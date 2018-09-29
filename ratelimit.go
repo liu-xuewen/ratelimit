@@ -8,6 +8,7 @@
 package ratelimit
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"sync"
@@ -105,13 +106,20 @@ func NewBucketWithRateAndClock(rate float64, capacity int64, clock Clock) *Bucke
 	// Use the same bucket each time through the loop
 	// to save allocations.
 	tb := NewBucketWithQuantumAndClock(1, capacity, 1, clock)
+	fmt.Println("capacity--",capacity)
 	for quantum := int64(1); quantum < 1<<50; quantum = nextQuantum(quantum) {
-		fillInterval := time.Duration(1e9 * float64(quantum) / rate)
+		fmt.Println("quantum",quantum,"nextQuantum(quantum)",nextQuantum(quantum))
+		fillInterval := time.Duration(1e9 * float64(quantum) / rate)  //当rate>0的时候, 这里不可能<=0,除非报错constant 0.1 truncated to integer
+		fmt.Println("fillInterval",fillInterval)
 		if fillInterval <= 0 {
 			continue
 		}
-		tb.fillInterval = fillInterval
-		tb.quantum = quantum
+		tb.fillInterval = fillInterval //fullinterval=1/rate s
+
+		tb.quantum = quantum       //所以quantum一般就是1
+		fmt.Println("tb.Rate() - rate",tb.Rate() - rate)  //一般就是0
+		fmt.Println("math.Abs(tb.Rate() - rate)",math.Abs(tb.Rate() - rate))
+		fmt.Println("math.Abs(tb.Rate() - rate)/rate ",math.Abs(tb.Rate() - rate)/rate )
 		if diff := math.Abs(tb.Rate() - rate); diff/rate <= rateMargin {
 			return tb
 		}
@@ -212,7 +220,7 @@ func (tb *Bucket) Take(count int64) time.Duration {
 func (tb *Bucket) TakeMaxDuration(count int64, maxWait time.Duration) (time.Duration, bool) {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
-	return tb.take(tb.clock.Now(), count, maxWait)
+	return tb.take(tb.clock.Now(), count, maxWait)//最大等待时间最好是0s
 }
 
 // TakeAvailable takes up to count immediately available tokens from the
@@ -226,7 +234,7 @@ func (tb *Bucket) TakeAvailable(count int64) int64 {
 
 // takeAvailable is the internal version of TakeAvailable - it takes the
 // current time as an argument to enable easy testing.
-func (tb *Bucket) takeAvailable(now time.Time, count int64) int64 {
+func (tb *Bucket) takeAvailable(now time.Time, count int64) int64 {//这个不带maxWait时间感觉很实用,加入传入maxwait时间为0s的情况下.
 	if count <= 0 {
 		return 0
 	}
@@ -267,6 +275,8 @@ func (tb *Bucket) Capacity() int64 {
 
 // Rate returns the fill rate of the bucket, in tokens per second.
 func (tb *Bucket) Rate() float64 {
+	fmt.Println("1e9",1e9)
+	fmt.Println("1e9 * float64(tb.quantum) / float64(tb.fillInterval)",1e9 * float64(tb.quantum) / float64(tb.fillInterval))
 	return 1e9 * float64(tb.quantum) / float64(tb.fillInterval)
 }
 
@@ -278,22 +288,39 @@ func (tb *Bucket) take(now time.Time, count int64, maxWait time.Duration) (time.
 	}
 
 	tick := tb.currentTick(now)
+	fmt.Println("-------tick",tick)
 	tb.adjustavailableTokens(tick)
+
+
+	fmt.Println("1------tb.availableTokens",tb.availableTokens)
+	fmt.Println("count",count)
 	avail := tb.availableTokens - count
-	if avail >= 0 {
+	fmt.Println("-------avail",avail)
+	if avail >= 0 {   //count为1,每次减去一个.  avail为减去1之后的结果.
 		tb.availableTokens = avail
 		return 0, true
 	}
+	fmt.Println("2------tb.availableTokens",tb.availableTokens)
 	// Round up the missing tokens to the nearest multiple
 	// of quantum - the tokens won't be available until
 	// that tick.
 
 	// endTick holds the tick when all the requested tokens will
 	// become available.
-	endTick := tick + (-avail+tb.quantum-1)/tb.quantum
-	endTime := tb.startTime.Add(time.Duration(endTick) * tb.fillInterval)
+
+	fmt.Println("3------tb.quantum",tb.quantum)
+
+	fmt.Println("4------(-avail+tb.quantum-1)",(-avail+tb.quantum-1))
+	endTick := tick + (-avail+tb.quantum-1)/tb.quantum //一般就是下一个tick, 当前tick加1.
+
+	fmt.Println("5------endTick",endTick)
+	endTime := tb.startTime.Add(time.Duration(endTick) * tb.fillInterval)//计算下一个tick的时间点
+	fmt.Println("6---------endTime",endTime)
+
 	waitTime := endTime.Sub(now)
-	if waitTime > maxWait {
+	fmt.Println("7---------waitTime",waitTime)
+	fmt.Println("8---------maxWait",maxWait)
+	if waitTime > maxWait {//如果需要等待的时间大于最大等待时间,则返回限制. 所以最好将最大等待时间设为0
 		return 0, false
 	}
 	tb.availableTokens = avail
@@ -303,6 +330,8 @@ func (tb *Bucket) take(now time.Time, count int64, maxWait time.Duration) (time.
 // currentTick returns the current time tick, measured
 // from tb.startTime.
 func (tb *Bucket) currentTick(now time.Time) int64 {
+	fmt.Println("now.Sub(tb.startTime)", now.Sub(tb.startTime), "tb.startTime", tb.startTime, "now", now, "tb.fillInterval:", tb.fillInterval)
+	fmt.Println("int64(now.Sub(tb.startTime) / tb.fillInterval):", int64(now.Sub(tb.startTime)/tb.fillInterval))
 	return int64(now.Sub(tb.startTime) / tb.fillInterval)
 }
 
@@ -310,14 +339,24 @@ func (tb *Bucket) currentTick(now time.Time) int64 {
 // available in the bucket at the given time, which must
 // be in the future (positive) with respect to tb.latestTick.
 func (tb *Bucket) adjustavailableTokens(tick int64) {
+	fmt.Println(1,tick)//111
+	fmt.Println(2,tb.availableTokens)//9
+	fmt.Println(3,tb.capacity)//10
 	if tb.availableTokens >= tb.capacity {
 		return
 	}
-	tb.availableTokens += (tick - tb.latestTick) * tb.quantum
-	if tb.availableTokens > tb.capacity {
+
+	fmt.Println("tb.latestTick",tb.latestTick)
+	fmt.Println("tb.quantum---",tb.quantum)
+	tb.availableTokens += (tick - tb.latestTick) * tb.quantum  //tb.latestTick是上个tick, 如果当前的tick就是上个tick, 则可获得的token数不变. 如果tick加了1,则加上一个quantum!!!!
+	fmt.Println(4,tb.availableTokens)
+	if tb.availableTokens > tb.capacity {   //如果可获取的token比容量大, 则将availableTokens 重置为容量!!!!
 		tb.availableTokens = tb.capacity
 	}
-	tb.latestTick = tick
+
+	fmt.Println("tb.availableTokens",tb.availableTokens)
+	fmt.Println(5,tb.latestTick)///111
+	tb.latestTick = tick   //将最新tick置为当前tick
 	return
 }
 
